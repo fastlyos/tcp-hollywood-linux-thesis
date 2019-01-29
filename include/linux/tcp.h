@@ -315,6 +315,12 @@ struct tcp_sock {
 	 * socket. Used to retransmit SYNACKs etc.
 	 */
 	struct request_sock *fastopen_rsk;
+	
+	/* TCP Hollywood */
+	u8	hlywd_ood;     /* deliver frames out-of-order? */
+	u8  hlywd_pr;      /* enable partial reliability?  */
+
+    u32 hlywd_playout; /* play out delay for partial reliability calculations */
 };
 
 enum tsq_flags {

@@ -2603,6 +2603,23 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		tp->notsent_lowat = val;
 		sk->sk_write_space(sk);
 		break;
+				
+	case TCP_HLYWD_OOD:
+		if (val) {
+			tp->hlywd_ood = 1;
+		} else {
+			tp->hlywd_ood = 0;
+		}
+		break;
+
+	case TCP_HLYWD_PR:
+		if (val) {
+			tp->hlywd_pr = 1;
+		} else {
+			tp->hlywd_pr = 0;
+		}
+		break;
+
 	default:
 		err = -ENOPROTOOPT;
 		break;
