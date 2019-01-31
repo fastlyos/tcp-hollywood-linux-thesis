@@ -26,7 +26,7 @@ void destroy_hollywood_input_segment(struct hlywd_input_segment *seg) {
 void destroy_hollywood_input_queue(struct hlywd_input_queue *q) {
     while (q->head != NULL) {
         struct hlywd_input_segment *next = q->head->next;
-        destroy_hollywood_input_segment(q->head->next);
+        destroy_hollywood_input_segment(q->head);
         q->head = next;
     }
 }
