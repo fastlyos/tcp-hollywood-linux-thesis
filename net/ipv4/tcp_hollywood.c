@@ -9,6 +9,11 @@
  *		2 of the License, or (at your option) any later version.
  */
  
+#include <linux/types.h>
+#include <linux/printk.h>
+#include <linux/skbuff.h>
+#include <linux/tcp.h>
+#include <net/tcp.h>
 #include <linux/hollywood.h>
 
 void destroy_hollywood_input_segment(struct hlywd_input_segment *seg) {
@@ -49,12 +54,12 @@ void enqueue_hollywood_input_segment(struct sock *sk, struct sk_buff *skb, int i
         seg->next = NULL;
             
         /* add to end of input queue */
-        if (tp->hlywd_input_q->head == NULL) {
-            tp->hlywd_input_q->head = seg;
-            tp->hlywd_input_q->tail = seg;
+        if (tp->hlywd_input_q.head == NULL) {
+            tp->hlywd_input_q.head = seg;
+            tp->hlywd_input_q.tail = seg;
         } else {
-            tp->hlywd_input_q->tail->next = seg;
-            tp->hlywd_input_q->tail = seg;
+            tp->hlywd_input_q.tail->next = seg;
+            tp->hlywd_input_q.tail = seg;
         }
         sk->sk_data_ready(sk);
     } else {
@@ -64,10 +69,10 @@ void enqueue_hollywood_input_segment(struct sock *sk, struct sk_buff *skb, int i
 
 void dequeue_hollywood_input_queue(struct sock *sk) {
     struct tcp_sock *tp = tcp_sk(sk);
-    struct hlywd_input_segment *head = tp->hlywd_input_q->head
+    struct hlywd_input_segment *head = tp->hlywd_input_q.head;
     if (head != NULL) {
         kfree(head->data);
-        tp->hlywd_input_q->head = head->next;
+        tp->hlywd_input_q.head = head->next;
         kfree(head);
     }
 }
