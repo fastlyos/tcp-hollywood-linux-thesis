@@ -420,8 +420,8 @@ void tcp_init_sock(struct sock *sk)
 
     /* TCP Hollywood initialisation */
     tp->hlywd_ood = 2;
-    tp->hlywd_input_q->head = NULL;
-    tp->hlywd_input_q->tail = NULL;
+    tp->hlywd_input_q.head = NULL;
+    tp->hlywd_input_q.tail = NULL;
 
 	local_bh_disable();
 	sock_update_memcg(sk);
@@ -1621,7 +1621,7 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
  	}
  	
     if (tp->hlywd_ood) {
-        hlywd_seg = tp->hlywd_input_q->head;
+        hlywd_seg = tp->hlywd_input_q.head;
         if (hlywd_seg == NULL) {
             release_sock(sk);
             return 0;
@@ -1630,9 +1630,9 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
             /* out-of-order segment */
             size_t read_len = min(hlywd_seg->length-hlywd_seg->offset, len-4);
             memcpy_toiovec(msg->msg_iov, (unsigned char *) hlywd_seg->data, read_len);
-            memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seg->sequence_num, 4);
+            memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seg->sequence_number, 4);
             
-            hlywd_seg->sequence_num += read_len;
+            hlywd_seg->sequence_number += read_len;
             hlywd_seg->offset += read_len;
             
             /* are we finished with this segment? */
@@ -1646,6 +1646,7 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
             /* in-order segment */
             size_t read_len = min(hlywd_seg->length-hlywd_seg->offset, len-4);
             len = read_len;
+            hlywd_readlen = read_len;
         }
     }
     
@@ -1941,10 +1942,10 @@ skip_copy:
 	tcp_cleanup_rbuf(sk, copied);
 
     if (tp->hlywd_ood) {
-        memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seg->sequence_num, 4);
+        memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seg->sequence_number, 4);
 
-        hlywd_seg->sequence_num += read_len;
-        hlywd_seg->offset += read_len;
+        hlywd_seg->sequence_number += hlywd_readlen;
+        hlywd_seg->offset += hlywd_readlen;
             
         /* are we finished with this segment? */
         if (hlywd_seg->length == hlywd_seg->offset) {
