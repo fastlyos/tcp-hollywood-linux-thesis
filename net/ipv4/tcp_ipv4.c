@@ -1537,6 +1537,11 @@ bool tcp_prequeue(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+    // Hollywood doesn't check the prequeue
+ 	if (tp->hlywd_ood == 1) {
+ 		return false;
+ 	}
+ 	
 	if (sysctl_tcp_low_latency || !tp->ucopy.task)
 		return false;
 

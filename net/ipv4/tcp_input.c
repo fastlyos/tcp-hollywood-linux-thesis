@@ -4125,7 +4125,13 @@ static bool tcp_try_coalesce(struct sock *sk,
 			     bool *fragstolen)
 {
 	int delta;
-
+    struct tcp_sock *tp = tcp_sk(sk);
+    
+    if (tp->hlywd_ood) {
+        /* we don't want to coalesce when out-of-order delivery is enabled */
+        return false;
+    }
+    
 	*fragstolen = false;
 
 	/* Its possible this segment overlaps with prior segment in queue */
@@ -4178,8 +4184,14 @@ static void tcp_ofo_queue(struct sock *sk)
 		tail = skb_peek_tail(&sk->sk_receive_queue);
 		eaten = tail && tcp_try_coalesce(sk, tail, skb, &fragstolen);
 		tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
-		if (!eaten)
+		if (!eaten) {
 			__skb_queue_tail(&sk->sk_receive_queue, skb);
+			
+			/* enqueue in-order segment for delivery by Hollywood */
+            if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
+                hollywood_enqueue_input_segment(sk, skb, 1);    
+            }
+		}
 		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
 			tcp_fin(sk);
 		if (eaten)
@@ -4215,7 +4227,7 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *skb1;
 	u32 seq, end_seq;
-
+    
 	tcp_ecn_check_ce(tp, skb);
 
 	if (unlikely(tcp_try_rmem_schedule(sk, skb, skb->truesize))) {
@@ -4228,6 +4240,11 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 	tp->pred_flags = 0;
 	inet_csk_schedule_ack(sk);
 
+    /* enqueue out-of-order segment for delivery by Hollywood */
+    if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
+        hollywood_enqueue_input_segment(sk, skb, 0);    
+    }
+    
 	NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPOFOQUEUE);
 	SOCK_DEBUG(sk, "out of order segment: rcv_next %X seq %X - %X\n",
 		   tp->rcv_nxt, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
@@ -4341,6 +4358,12 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
 {
 	int eaten;
 	struct sk_buff *tail = skb_peek_tail(&sk->sk_receive_queue);
+    struct tcp_sock *tp = tcp_sk(sk);
+    
+    /* enqueue in-order segment for delivery by Hollywood */
+    if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
+        hollywood_enqueue_input_segment(sk, skb, 1);    
+    }
 
 	__skb_pull(skb, hdrlen);
 	eaten = (tail &&
@@ -4437,7 +4460,7 @@ static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 			__set_current_state(TASK_RUNNING);
 
 			local_bh_enable();
-			if (!skb_copy_datagram_iovec(skb, 0, tp->ucopy.iov, chunk)) {
+			if (!(tp->hlywd_ood) && !skb_copy_datagram_iovec(skb, 0, tp->ucopy.iov, chunk)) {
 				tp->ucopy.len -= chunk;
 				tp->copied_seq += chunk;
 				eaten = (chunk == skb->len);
@@ -5181,7 +5204,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 			    sock_owned_by_user(sk)) {
 				__set_current_state(TASK_RUNNING);
 
-				if (!tcp_copy_to_iovec(sk, skb, tcp_header_len)) {
+				if (!(tp->hlywd_ood) && !tcp_copy_to_iovec(sk, skb, tcp_header_len)) {
 					/* Predicted packet is in window by definition.
 					 * seq == rcv_nxt and rcv_wup <= rcv_nxt.
 					 * Hence, check seq<=rcv_wup reduces to:

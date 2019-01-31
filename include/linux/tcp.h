@@ -24,6 +24,8 @@
 #include <net/inet_timewait_sock.h>
 #include <uapi/linux/tcp.h>
 
+#include <linux/hollywood.h>
+
 static inline struct tcphdr *tcp_hdr(const struct sk_buff *skb)
 {
 	return (struct tcphdr *)skb_transport_header(skb);
@@ -320,7 +322,9 @@ struct tcp_sock {
 	u8	hlywd_ood;     /* deliver frames out-of-order? */
 	u8  hlywd_pr;      /* enable partial reliability?  */
 
-    u32 hlywd_playout; /* play out delay for partial reliability calculations */
+	u32 hlywd_playout; /* play out delay for partial reliability calculations */
+	
+	struct hlywd_input_queue hlywd_input_q;
 };
 
 enum tsq_flags {
