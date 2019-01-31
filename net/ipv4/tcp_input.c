@@ -75,6 +75,7 @@
 #include <linux/ipsec.h>
 #include <asm/unaligned.h>
 #include <linux/errqueue.h>
+#include <linux/hollywood.h>
 
 int sysctl_tcp_timestamps __read_mostly = 1;
 int sysctl_tcp_window_scaling __read_mostly = 1;
@@ -4189,7 +4190,7 @@ static void tcp_ofo_queue(struct sock *sk)
 			
 			/* enqueue in-order segment for delivery by Hollywood */
             if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
-                hollywood_enqueue_input_segment(sk, skb, 1);    
+                enqueue_hollywood_input_segment(sk, skb, 1);    
             }
 		}
 		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
@@ -4242,7 +4243,7 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 
     /* enqueue out-of-order segment for delivery by Hollywood */
     if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
-        hollywood_enqueue_input_segment(sk, skb, 0);    
+        enqueue_hollywood_input_segment(sk, skb, 0);    
     }
     
 	NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPOFOQUEUE);
@@ -4362,7 +4363,7 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
     
     /* enqueue in-order segment for delivery by Hollywood */
     if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
-        hollywood_enqueue_input_segment(sk, skb, 1);    
+        enqueue_hollywood_input_segment(sk, skb, 1);    
     }
 
 	__skb_pull(skb, hdrlen);

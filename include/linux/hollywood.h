@@ -32,4 +32,9 @@ struct hlywd_input_queue {
     struct hlywd_input_segment *tail;
 };
 
+void destroy_hollywood_input_segment(struct hlywd_input_segment *seg);
+void destroy_hollywood_input_queue(struct hlywd_input_queue *q);
+void enqueue_hollywood_input_segment(struct sock *sk, struct sk_buff *skb, int in_order);
+void dequeue_hollywood_input_queue(struct sock *sk);
+
 #endif	/* _LINUX_HLYWD_H */

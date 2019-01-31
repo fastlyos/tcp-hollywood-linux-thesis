@@ -1602,7 +1602,7 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	struct sk_buff *skb;
 	u32 urg_hole = 0;
 	struct hlywd_input_segment *hlywd_seg = NULL;
-	size_t hlywd_readlen;
+	size_t hlywd_readlen = 0;
     
 	if (unlikely(flags & MSG_ERRQUEUE))
 		return inet_recv_error(sk, msg, len, addr_len);
