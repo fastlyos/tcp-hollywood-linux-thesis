@@ -31,3 +31,5 @@ struct hlywd_input_queue {
     struct hlywd_input_segment *head;
     struct hlywd_input_segment *tail;
 };
+
+#endif	/* _LINUX_HLYWD_H */
