@@ -325,6 +325,7 @@ struct tcp_sock {
 	u32 hlywd_playout; /* play out delay for partial reliability calculations */
 	
 	struct hlywd_input_queue hlywd_input_q;
+	struct hlywd_input_queue hlywd_input_free_q;
 };
 
 enum tsq_flags {

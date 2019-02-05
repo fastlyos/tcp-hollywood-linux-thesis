@@ -4182,16 +4182,16 @@ static void tcp_ofo_queue(struct sock *sk)
 			   tp->rcv_nxt, TCP_SKB_CB(skb)->seq,
 			   TCP_SKB_CB(skb)->end_seq);
 
+		/* enqueue in-order segment for delivery by Hollywood */
+        if (tp->hlywd_ood && skb->len > 0) {
+            enqueue_hollywood_input_segment(sk, skb, skb->len, 1);    
+        }
+    
 		tail = skb_peek_tail(&sk->sk_receive_queue);
 		eaten = tail && tcp_try_coalesce(sk, tail, skb, &fragstolen);
 		tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
 		if (!eaten) {
 			__skb_queue_tail(&sk->sk_receive_queue, skb);
-			
-			/* enqueue in-order segment for delivery by Hollywood */
-            if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
-                enqueue_hollywood_input_segment(sk, skb, 1);    
-            }
 		}
 		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
 			tcp_fin(sk);
@@ -4243,7 +4243,7 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 
     /* enqueue out-of-order segment for delivery by Hollywood */
     if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
-        enqueue_hollywood_input_segment(sk, skb, 0);    
+        enqueue_hollywood_input_segment(sk, skb, skb->len, 0);    
     }
     
 	NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_TCPOFOQUEUE);
@@ -4363,7 +4363,7 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int 
     
     /* enqueue in-order segment for delivery by Hollywood */
     if (tp->hlywd_ood && skb->len-tp->tcp_header_len > 0) {
-        enqueue_hollywood_input_segment(sk, skb, 1);    
+        enqueue_hollywood_input_segment(sk, skb, skb->len-hdrlen, 1);    
     }
 
 	__skb_pull(skb, hdrlen);

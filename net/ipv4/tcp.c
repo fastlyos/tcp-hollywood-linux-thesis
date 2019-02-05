@@ -1601,9 +1601,8 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	struct task_struct *user_recv = NULL;
 	struct sk_buff *skb;
 	u32 urg_hole = 0;
-	struct hlywd_input_segment *hlywd_seg = NULL;
-	size_t hlywd_readlen = 0;
-    
+	struct hlywd_input_segment *current_hlywd_segment = NULL;
+
 	if (unlikely(flags & MSG_ERRQUEUE))
 		return inet_recv_error(sk, msg, len, addr_len);
 
@@ -1613,43 +1612,11 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 
 	lock_sock(sk);
 
-    /* TCP Hollywood read processing */
-    
-    if (tp->hlywd_ood == 2) {
- 		tp->hlywd_ood = 0;
- 		destroy_hollywood_input_queue(&tp->hlywd_input_q);
- 	}
- 	
-    if (tp->hlywd_ood) {
-        hlywd_seg = tp->hlywd_input_q.head;
-        if (hlywd_seg == NULL) {
-            release_sock(sk);
-            return 0;
-        } 
-        if (hlywd_seg->data != NULL) {
-            /* out-of-order segment */
-            size_t read_len = min(hlywd_seg->length-hlywd_seg->offset, len-4);
-            memcpy_toiovec(msg->msg_iov, (unsigned char *) hlywd_seg->data, read_len);
-            memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seg->sequence_number, 4);
-            
-            hlywd_seg->sequence_number += read_len;
-            hlywd_seg->offset += read_len;
-            
-            /* are we finished with this segment? */
-            if (hlywd_seg->length == hlywd_seg->offset) {
-                dequeue_hollywood_input_queue(sk);
-            }
+	if (tp->hlywd_ood == 2) {
+		tp->hlywd_ood = 0;
+		destroy_hollywood_input_queue(&tp->hlywd_input_q);
+	}
 
-            release_sock(sk);
-            return read_len+4;
-        } else {
-            /* in-order segment */
-            size_t read_len = min(hlywd_seg->length-hlywd_seg->offset, len-4);
-            len = read_len;
-            hlywd_readlen = read_len;
-        }
-    }
-    
 	err = -ENOTCONN;
 	if (sk->sk_state == TCP_LISTEN)
 		goto out;
@@ -1696,6 +1663,31 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 			}
 		}
 
+		if (tp->hlywd_ood) {
+			if (tp->hlywd_input_q.head != NULL && tp->hlywd_input_q.head->data != NULL) {
+				/* segment at head of list is out-of-order - can process immediately */
+				len = (len-4 > (tp->hlywd_input_q.head->length-tp->hlywd_input_q.head->offset)) ? (tp->hlywd_input_q.head->length-tp->hlywd_input_q.head->offset) : len-4;
+				u32 hlywd_seq = tp->hlywd_input_q.head->sequence_number+tp->hlywd_input_q.head->offset;
+
+				memcpy_toiovec(msg->msg_iov, (unsigned char *) tp->hlywd_input_q.head->data+tp->hlywd_input_q.head->offset, len);
+				memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seq, 4);
+
+				if (len == (tp->hlywd_input_q.head->length-tp->hlywd_input_q.head->offset)) {
+					/* consumed whole segment */
+					kfree(tp->hlywd_input_q.head->data);
+					struct hlywd_input_segment *head = tp->hlywd_input_q.head;
+					tp->hlywd_input_q.head = head->next;
+					free_hollywood_input_segment(head, sk);
+				} else {
+					/* didn't consume whole segment */
+					tp->hlywd_input_q.head->offset = tp->hlywd_input_q.head->offset + len;
+				}
+
+				release_sock(sk);
+				return len+4;
+			}
+		}
+
 		/* Next get a buffer. */
 
 		skb_queue_walk(&sk->sk_receive_queue, skb) {
@@ -1707,6 +1699,32 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 				 *seq, TCP_SKB_CB(skb)->seq, tp->rcv_nxt,
 				 flags))
 				break;
+
+			if (tp->hlywd_ood && current_hlywd_segment == NULL && tp->hlywd_input_q.head != NULL) {
+				len = (len-4 > (tp->hlywd_input_q.head->length-tp->hlywd_input_q.head->offset)) ? (tp->hlywd_input_q.head->length-tp->hlywd_input_q.head->offset) : len-4;
+				if (tp->hlywd_input_q.head->data != NULL) {
+					/* segment at head of list is out-of-order - can process immediately */
+					u32 hlywd_seq = tp->hlywd_input_q.head->sequence_number+tp->hlywd_input_q.head->offset;
+
+					memcpy_toiovec(msg->msg_iov, (unsigned char *) tp->hlywd_input_q.head->data+tp->hlywd_input_q.head->offset, len);
+					memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seq, 4);
+					
+					if (len == (tp->hlywd_input_q.head->length-tp->hlywd_input_q.head->offset)) {
+						/* consumed whole segment */
+						kfree(tp->hlywd_input_q.head->data);
+						struct hlywd_input_segment *head = tp->hlywd_input_q.head;
+						tp->hlywd_input_q.head = head->next;
+						free_hollywood_input_segment(head, sk);
+					} else {
+						/* didn't consume whole segment */
+						tp->hlywd_input_q.head->offset = tp->hlywd_input_q.head->offset + len;
+					}
+					release_sock(sk);
+					return len+4;
+				} else {
+					current_hlywd_segment = tp->hlywd_input_q.head;
+				}
+			}
 
 			offset = *seq - TCP_SKB_CB(skb)->seq;
 			if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_SYN)
@@ -1722,27 +1740,31 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 
 		/* Well, if we have backlog, try to process it now yet. */
 
-		if (copied >= target && !sk->sk_backlog.tail)
+		if (copied >= target && !sk->sk_backlog.tail) {
 			break;
+		}
 
 		if (copied) {
 			if (sk->sk_err ||
 			    sk->sk_state == TCP_CLOSE ||
 			    (sk->sk_shutdown & RCV_SHUTDOWN) ||
 			    !timeo ||
-			    signal_pending(current))
+			    signal_pending(current)) {
 				break;
+			}
 		} else {
-			if (sock_flag(sk, SOCK_DONE))
+			if (sock_flag(sk, SOCK_DONE)) {
 				break;
+			}
 
 			if (sk->sk_err) {
 				copied = sock_error(sk);
 				break;
 			}
 
-			if (sk->sk_shutdown & RCV_SHUTDOWN)
+			if (sk->sk_shutdown & RCV_SHUTDOWN) {
 				break;
+			}
 
 			if (sk->sk_state == TCP_CLOSE) {
 				if (!sock_flag(sk, SOCK_DONE)) {
@@ -1890,7 +1912,7 @@ do_prequeue:
 		*seq += used;
 		copied += used;
 		len -= used;
-        
+
 		tcp_rcv_space_adjust(sk);
 
 skip_copy:
@@ -1941,18 +1963,26 @@ skip_copy:
 	/* Clean up data we have read: This will do ACK frames. */
 	tcp_cleanup_rbuf(sk, copied);
 
-    if (tp->hlywd_ood) {
-        memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seg->sequence_number, 4);
+	if (tp->hlywd_ood && tp->hlywd_input_q.head != NULL) {
+		u32 hlywd_seqnum = tp->hlywd_input_q.head->sequence_number+tp->hlywd_input_q.head->offset;
 
-        hlywd_seg->sequence_number += hlywd_readlen;
-        hlywd_seg->offset += hlywd_readlen;
-            
-        /* are we finished with this segment? */
-        if (hlywd_seg->length == hlywd_seg->offset) {
-            dequeue_hollywood_input_queue(sk);
-        }
-    }
-        
+		/* process hollywood segment! */
+		if (copied == (current_hlywd_segment->length-current_hlywd_segment->offset)) {
+			/* consumed whole segment */
+			struct hlywd_input_segment *head = tp->hlywd_input_q.head;
+			tp->hlywd_input_q.head = head->next;
+			free_hollywood_input_segment(head, sk);
+		} else {
+			/* didn't consume whole segment */
+			tp->hlywd_input_q.head->offset = tp->hlywd_input_q.head->offset + copied;
+		}
+		// append sequence number
+		if (copied > 0) {
+			memcpy_toiovec(msg->msg_iov, (unsigned char *) &hlywd_seqnum, 4);
+			copied += 4;
+		}
+	}
+
 	release_sock(sk);
 	return copied;
 
@@ -2429,6 +2459,22 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 	lock_sock(sk);
 
 	switch (optname) {
+    case TCP_HLYWD_OOD:
+	    tp->hlywd_ood = val ? 1 : 0;
+	    if (tp->hlywd_ood) {
+	        printk("TCP Hollywood: out-of-order delivery enabled\n");
+	    } else {
+	        printk("TCP Hollywood: out-of-order delivery disabled\n");
+	        destroy_hollywood_input_queue(&tp->hlywd_input_q);
+	    }
+		break;
+	case TCP_HLYWD_PR:
+		if (val) {
+			tp->hlywd_pr = 1;
+		} else {
+			tp->hlywd_pr = 0;
+		}
+		break;
 	case TCP_MAXSEG:
 		/* Values greater than interface MTU won't take effect. However
 		 * at the point when this call is done we typically don't yet
@@ -2659,25 +2705,6 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		tp->notsent_lowat = val;
 		sk->sk_write_space(sk);
 		break;
-				
-	case TCP_HLYWD_OOD:
-	    tp->hlywd_ood = val ? 1 : 0;
-	    if (tp->hlywd_ood) {
-	        printk("TCP Hollywood: out-of-order delivery enabled\n");
-	    } else {
-	        printk("TCP Hollywood: out-of-order delivery disabled\n");
-	        destroy_hollywood_input_queue(&tp->hlywd_input_q);
-	    }
-		break;
-
-	case TCP_HLYWD_PR:
-		if (val) {
-			tp->hlywd_pr = 1;
-		} else {
-			tp->hlywd_pr = 0;
-		}
-		break;
-
 	default:
 		err = -ENOPROTOOPT;
 		break;
