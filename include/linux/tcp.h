@@ -322,10 +322,13 @@ struct tcp_sock {
 	u8	hlywd_ood;     /* deliver frames out-of-order? */
 	u8  hlywd_pr;      /* enable partial reliability?  */
 
-	u32 hlywd_playout; /* play out delay for partial reliability calculations */
+	struct timespec hlywd_playout; /* play out delay for partial reliability calculations */
 	
 	struct hlywd_input_queue hlywd_input_q;
 	struct hlywd_input_queue hlywd_input_free_q;
+	
+	struct hlywd_output_queue hlywd_output_q;
+	struct hlywd_output_queue hlywd_output_free_q;
 };
 
 enum tsq_flags {

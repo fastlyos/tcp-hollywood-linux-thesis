@@ -280,6 +280,8 @@
 #include <asm/ioctls.h>
 #include <net/busy_poll.h>
 
+#include <linux/hollywood.h>
+
 int sysctl_tcp_fin_timeout __read_mostly = TCP_FIN_TIMEOUT;
 
 int sysctl_tcp_min_tso_segs __read_mostly = 2;
@@ -420,8 +422,15 @@ void tcp_init_sock(struct sock *sk)
 
     /* TCP Hollywood initialisation */
     tp->hlywd_ood = 2;
+    tp->hlywd_pr = 0;
     tp->hlywd_input_q.head = NULL;
     tp->hlywd_input_q.tail = NULL;
+    tp->hlywd_input_free_q.head = NULL;
+    tp->hlywd_input_free_q.tail = NULL;
+    tp->hlywd_output_q.head = NULL;
+    tp->hlywd_output_q.tail = NULL;
+    tp->hlywd_output_free_q.head = NULL;
+    tp->hlywd_output_free_q.tail = NULL;
 
 	local_bh_disable();
 	sock_update_memcg(sk);
@@ -1100,6 +1109,12 @@ int tcp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 
 	lock_sock(sk);
 
+    if (tp->hlywd_pr) {
+        size_t metadata_size = enqueue_hollywood_output_msg(sk, msg->msg_iov->iov_base+msg->msg_iov->iov_len- (9 + (2*sizeof(struct timespec))), size);
+        msg->msg_iov->iov_len -= metadata_size;
+ 		size -= metadata_size;
+    }
+    
 	flags = msg->msg_flags;
 	if (flags & MSG_FASTOPEN) {
 		err = tcp_sendmsg_fastopen(sk, msg, &copied_syn, size);
@@ -2469,11 +2484,13 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 	    }
 		break;
 	case TCP_HLYWD_PR:
-		if (val) {
-			tp->hlywd_pr = 1;
-		} else {
-			tp->hlywd_pr = 0;
-		}
+	    tp->hlywd_pr = val ? 1 : 0;
+	    if (tp->hlywd_pr) {
+	        printk("TCP Hollywood: partial reliability enabled\n");
+	    } else {
+	        printk("TCP Hollywood: partial reliability disabled\n");
+	        destroy_hollywood_output_queue(&tp->hlywd_output_q);
+	    }
 		break;
 	case TCP_MAXSEG:
 		/* Values greater than interface MTU won't take effect. However

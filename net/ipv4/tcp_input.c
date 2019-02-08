@@ -3070,6 +3070,10 @@ static int tcp_clean_rtx_queue(struct sock *sk, int prior_fackets,
 
 	first_ackt.v64 = 0;
 
+    if (tp->hlywd_pr) {
+        dequeue_hollywood_output_queue(sk, tp->snd_una-prior_snd_una);
+    }
+	
 	while ((skb = tcp_write_queue_head(sk)) && skb != tcp_send_head(sk)) {
 		struct tcp_skb_cb *scb = TCP_SKB_CB(skb);
 		u8 sacked = scb->sacked;

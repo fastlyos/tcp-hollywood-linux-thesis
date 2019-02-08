@@ -2522,6 +2522,10 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 
 	tcp_retrans_try_collapse(sk, skb, cur_mss);
 
+    if (tp->hlywd_pr) {
+        process_rtx(sk, skb);
+    }
+
 	/* Make a copy, if the first transmission SKB clone we made
 	 * is still in somebody's hands, else make a clone.
 	 */
