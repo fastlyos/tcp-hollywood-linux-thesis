@@ -19,16 +19,15 @@
 struct hlywd_output_msg {
     u32 msg_id; /* ID of this message */
     size_t length; /* length of this message */
-    struct timespec lifetime; /* lifetime of this message */
+    struct timespec deadline; /* deadline of this message */
     u8 substream; /* ID of the substream of this message */
-    struct timespec time_queued; /* time that this message was queued */
 
     /* flags */
     int partially_acked; /* set if this message has been partially ack'd */
     int has_dependencies; /* set if this message has dependencies */
-    int replaced; /* set if this message can be replaced */
+    int is_replacement; /* set if this message can be replaced */
     
-    int incrtx_count; /* number of times this message has been inconsistently retransmitted */
+    int sent; /* number of times this message has been inconsistently retransmitted */
     
     struct hlywd_output_msg *next; /* next output message in queue */
 };
@@ -76,6 +75,6 @@ void free_hollywood_output_message(struct hlywd_output_msg *msg, struct sock *sk
 struct hlywd_output_msg *get_hollywood_output_message(struct sock *sk);
 void dequeue_hollywood_output_queue(struct sock *sk, size_t bytes_acked);
 size_t enqueue_hollywood_output_msg(struct sock *sk, unsigned char __user *metadata, size_t write_size);
-void process_rtx(struct sock *sk, struct sk_buff *skb);
+void process_tx(struct sock *sk, struct sk_buff *skb);
 
 #endif	/* _LINUX_HLYWD_H */

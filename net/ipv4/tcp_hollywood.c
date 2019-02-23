@@ -7,6 +7,13 @@
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
+ *
+ * COBS encoding (cobs_encode function)
+ *
+ * Author: Jacques Fortier
+ *
+ *    Copyright 2011, all rights reserved. Redistribution and use in source
+ *    and binary forms are permitted, with or without modification.
  */
  
 #include <linux/types.h>
@@ -15,6 +22,57 @@
 #include <linux/tcp.h>
 #include <net/tcp.h>
 #include <linux/hollywood.h>
+
+/* Stuffs "length" bytes of data at the location pointed to by
+ * "input", writing the output to the location pointed to by
+ * "output". Returns the number of bytes written to "output".
+ *
+ * Remove the "restrict" qualifiers if compiling with a
+ * pre-C99 C dialect.
+ */
+size_t cobs_encode(const uint8_t *input, size_t length, uint8_t *output)
+{
+    size_t read_index = 0;
+    size_t write_index = 1;
+    size_t code_index = 0;
+    uint8_t code = 1;
+
+    while(read_index < length)
+    {
+        if(input[read_index] == 0)
+        {
+            output[code_index] = code;
+            code = 1;
+            code_index = write_index++;
+            read_index++;
+        }
+        else
+        {
+            output[write_index++] = input[read_index++];
+            code++;
+            if(code == 0xFF)
+            {
+                output[code_index] = code;
+                code = 1;
+                code_index = write_index++;
+            }
+        }
+    }
+
+    output[code_index] = code;
+
+    return write_index;
+}
+
+uint8_t *generate_padding_message(struct sock *sk, int padding_length) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    int cobs_added_bytes = padding_length/257; /* every 256 bytes, COBS adds a byte */
+    uint8_t *padding_message_encoded = (uint8_t *) kmalloc(padding_length, GFP_KERNEL); 
+    padding_message_encoded[0] = '\0';
+    size_t encoded_len = cobs_encode(tp->hlywd_padding_buffer, padding_length-3-cobs_added_bytes, padding_message_encoded+1);
+    padding_message_encoded[encoded_len+2] = '\0';
+    return padding_message_encoded;
+}
 
 void destroy_hollywood_output_message(struct hlywd_output_msg *msg) {
     kfree(msg);
@@ -70,28 +128,37 @@ size_t enqueue_hollywood_output_msg(struct sock *sk, unsigned char __user *metad
 
     /* set message metadata */
     copy_from_user((void *) &msg->substream, metadata, 1);
-
-    printk("msg->substream %u\n", msg->substream);
     
     if (msg->substream == 2) {
-        metadata_size = 9+2*sizeof(struct timespec);
+        metadata_size = 9+sizeof(struct timespec);
         copy_from_user((void *) &msg->msg_id, metadata+1, 4);
-        copy_from_user((void *) &msg->lifetime, metadata+5, sizeof(struct timespec));
-        copy_from_user((void *) &tp->hlywd_playout, metadata+5+sizeof(struct timespec), sizeof(struct timespec));
+        copy_from_user((void *) &msg->deadline, metadata+5, sizeof(struct timespec));
         u32 dependency_msg_id;
-        copy_from_user((void *) &dependency_msg_id, metadata+5+2*sizeof(struct timespec), 4);
-        getnstimeofday(&msg->time_queued);
+        copy_from_user((void *) &dependency_msg_id, metadata+5+sizeof(struct timespec), 4);
+        /* dependency management */
+        if (dependency_msg_id != msg->msg_id) {
+            struct hlywd_output_msg *dep_msg = tp->hlywd_output_q.head;
+            while (dep_msg != NULL) {
+                if (dep_msg->substream == 2 && dep_msg->msg_id == dependency_msg_id) {
+                    dep_msg->has_dependencies = 1;
+                }
+                dep_msg = dep_msg->next;
+            }
+            if (dependency_msg_id > tp->hlywd_highest_dep_id) {
+                tp->hlywd_highest_dep_id = dependency_msg_id;
+            }
+        }
         msg->partially_acked = 0;
         msg->has_dependencies = 0;
-        msg->replaced = 0;
-        msg->incrtx_count = 0;
-        msg->length = write_size - (9+2*sizeof(struct timespec));
-        printk("Hollywood (PR): queued msg (id %u, lifetime %lld.%.9ld)\n", msg->msg_id, msg->lifetime.tv_sec, msg->lifetime.tv_nsec);
+        msg->is_replacement = 0;
+        msg->sent = 0;
+        msg->length = write_size - (9+sizeof(struct timespec));
+        //printk("Hollywood (PR): queued msg (id %u, deadline %lld.%.9ld)\n", msg->msg_id, msg->deadline.tv_sec, msg->deadline.tv_nsec);
     } else {
         metadata_size = 1;
         msg->length = write_size - 1;
         msg->msg_id = 0;
-        printk("Hollywood (PR): queued msg (id %u)\n", msg->msg_id);
+        //printk("Hollywood (PR): queued msg (id %u)\n", msg->msg_id);
     }
     
     msg->next = NULL;
@@ -117,12 +184,12 @@ void dequeue_hollywood_output_queue(struct sock *sk, size_t bytes_acked) {
             break;
         }
         if (head->length <= bytes_acked) {
-            printk("TCP Hollywood: fully ACK'd msg %u\n", head->msg_id);
+            //printk("TCP Hollywood: fully ACK'd msg %u\n", head->msg_id);
             tp->hlywd_output_q.head = head->next;
             bytes_acked -= head->length;
             free_hollywood_output_message(head, sk);
         } else {
-            printk("TCP Hollywood: partially ACK'd msg %u\n", head->msg_id);
+            //printk("TCP Hollywood: partially ACK'd msg %u\n", head->msg_id);
             head->length -= bytes_acked;
             head->partially_acked = 1;
             bytes_acked = 0;
@@ -130,41 +197,48 @@ void dequeue_hollywood_output_queue(struct sock *sk, size_t bytes_acked) {
     }
 }
 
-int check_message_liveness(struct sock *sk, struct timespec *current_time, struct timespec *owd, struct hlywd_output_msg *msg) {
-    struct tcp_sock *tp = tcp_sk(sk);
-     
-    /* calculate sender queueing delay */
-    struct timespec snd_q_delay = timespec_sub(*current_time, msg->time_queued);
-    
-    /* calculate total delay */
-    struct timespec total_delay;
-    total_delay = timespec_add(snd_q_delay, *owd);
-    total_delay = timespec_add(total_delay, tp->hlywd_playout);
-    
-    printk("TCPH: checking liveness of msg %u .. snd_q_delay %lld.%.9ld owd %lld.%.9ld playout %lld.%.9ld total %lld.%.9ld lifetime %lld.%.9ld\n",
-            msg->msg_id,
-            snd_q_delay.tv_sec, snd_q_delay.tv_nsec,
-            owd->tv_sec, owd->tv_nsec,
-            tp->hlywd_playout.tv_sec, tp->hlywd_playout.tv_nsec,
-            total_delay.tv_sec, total_delay.tv_nsec,
-            msg->lifetime.tv_sec, msg->lifetime.tv_nsec);
+struct timespec check_message_liveness(struct sock *sk, struct timespec *current_time, struct timespec *owd, struct hlywd_output_msg *msg, int *expired) {     
+    /* estimate arrival time */
+    struct timespec arrival_est = timespec_add(*current_time, *owd);
 
-    if (timespec_compare(&msg->lifetime, &total_delay) >= 0) {
-        return 1;
+    //printk("TCPH: checking liveness of msg %u .. current_time %lld.%.9ld owd %lld.%.9ld arrival_est %lld.%.9ld deadline %lld.%.9ld\n",
+    //        msg->msg_id,
+    //        current_time->tv_sec, current_time->tv_nsec,
+    //        owd->tv_sec, owd->tv_nsec,
+    //        arrival_est.tv_sec, arrival_est.tv_nsec,
+    //        msg->deadline.tv_sec, msg->deadline.tv_nsec);
+
+    if (timespec_compare(&arrival_est, &msg->deadline) > 0) {
+        *expired = 1;
+        return timespec_sub(arrival_est, msg->deadline);
     } else {
-        return 0;
+        *expired = 0;
+        return timespec_sub(msg->deadline, arrival_est);
     }
 }
 
-void process_rtx(struct sock *sk, struct sk_buff *skb) {
+void process_tx(struct sock *sk, struct sk_buff *skb) {
+    if (sk == NULL || skb == NULL || skb->len <= 0) {
+        return;
+    }
     struct tcp_sock *tp = tcp_sk(sk);
     struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
-    printk("TCP Hollywood (PR): retransmitting seq %u len %d\n", tcb->seq, skb->len);
+    if (tp == NULL || tcb == NULL) {
+        return;
+    }
+    
+    //printk("TCP Hollywood (PR): transmitting seq %u len %d\n", tcb->seq, skb->len);
+    
     size_t offset = tcb->seq-tp->snd_una;
-    size_t bytes_retrans = skb->len;
+    size_t bytes_trans = skb->len;
     struct hlywd_output_msg *msg = tp->hlywd_output_q.head;
     struct timespec owd_est;
     struct timespec current_time;
+    int bytes_to_msg = 0;
+
+    if (msg == NULL) {
+        return;
+    }
     
     /* set current time */
     getnstimeofday(&current_time);
@@ -174,64 +248,126 @@ void process_rtx(struct sock *sk, struct sk_buff *skb) {
     owd_est.tv_sec = owd_nsec / 1000000000;
     owd_est.tv_nsec = owd_nsec % 1000000000;
     
-    while (offset > 0) {
+    while (offset > 0 && msg != NULL) {
         if (msg->length <= offset) {
+            /* message is entirely in offset (not sent) */
             msg = msg->next;
             offset -= msg->length;
         } else {
-            bytes_retrans -= (msg->length - offset);
+            /* message is _partially_ in offset -- some of it is sent */
+            bytes_trans -= (msg->length - offset);
+            bytes_to_msg += (msg->length - offset);
             offset = 0;
-            printk("TCP Hollywood (PR): Partially retransmitting msg %u\n", msg->msg_id);
+            msg->sent = 1;
             msg = msg->next;
         }
     }
     
-    /* msg points to first complete message being retransmitted */
-    while (msg != NULL && bytes_retrans > 0) {
-        if (msg->length <= bytes_retrans) {
-            /* fully retransmitting this message -- has it expired? */
-            printk("TCP Hollywood (PR): Fully retransmitting msg %u\n", msg->msg_id);
-            if (!check_message_liveness(sk, &current_time, &owd_est, msg)) {
-                printk("TCPH: msg %u expired\n", msg->msg_id);
-                struct hlywd_output_msg *best_replacement = msg;
-                struct hlywd_output_msg *candidate_replacement = msg->next;
-                int min_incrtx_count = 0;
+    /* msg should now point to the first complete message being sent */
+    while (bytes_trans > 0 && msg != NULL) {
+        if (msg-> length <= bytes_trans && msg->sent == 1) {
+            /* msg is being transmitted in full -- should be checked for liveness */
+            int msg_expired = 0;
+            struct timespec timediff = check_message_liveness(sk, &current_time, &owd_est, msg, &msg_expired);
+            if ((msg->has_dependencies == 1 && msg->is_replacement == 0) || (msg->msg_id <= tp->hlywd_highest_dep_id && msg->is_replacement == 0)) {
+                msg->sent = 1;
+            } else if ((msg_expired == 1 && msg->sent == 0) || msg->sent == 1) {
+                /* msg has expired -- need to find a replacement */
+                /* best unexpired candidate */
+                struct hlywd_output_msg *best_live = NULL;
+                struct timespec          best_live_timediff;
+                int                      bytes_to_best_live_replacement = 0;
+                /* best expired candidate */
+                struct hlywd_output_msg *best_expired = NULL;
+                struct timespec          best_expired_timediff;
+                int                      bytes_to_best_expired_replacement = 0;
+                /* candidate replacement search */
+                struct hlywd_output_msg *candidate_replacement = tp->hlywd_output_q.head;
+                int                      bytes_to_candidate = 0;
                 while (candidate_replacement != NULL) {
-                    if (candidate_replacement->length != msg->length) {
-                        candidate_replacement = candidate_replacement->next;
-                        continue;
+                    int length_diff = msg->length-candidate_replacement->length;
+                    if (length_diff == 0 || (length_diff >= 4 && length_diff <= 1500)) {
+                        int candidate_replacement_expired = 0;
+                        struct timespec replacement_timediff = check_message_liveness(sk, &current_time, &owd_est, candidate_replacement, &candidate_replacement_expired);
+                        if (!candidate_replacement_expired) {
+                            /* candidate replacement is live */
+                            if (best_live == NULL || timespec_compare(&replacement_timediff, &best_live_timediff) < 0) {
+                                best_live = candidate_replacement;
+                                best_live_timediff = replacement_timediff;
+                                bytes_to_best_live_replacement = bytes_to_candidate;
+                            }
+                        } else {
+                            /* candidate replacement is expired */
+                            if (best_live == NULL && (best_expired == NULL || timespec_compare(&replacement_timediff, &best_expired_timediff) < 0)) {
+                                best_expired = candidate_replacement;
+                                best_expired_timediff = replacement_timediff;
+                                bytes_to_best_expired_replacement = bytes_to_candidate;
+                            }
+                        }
                     }
-                    if (!check_message_liveness(sk, &current_time, &owd_est, candidate_replacement)) {
-                        printk(".. expired - moving on\n");
-                        candidate_replacement = candidate_replacement->next;
-                        continue;
-                    }
-                    if (candidate_replacement->incrtx_count == 0) {
-                        printk(".. hasn't been retransmitted -- taking this one\n");
-                        best_replacement = candidate_replacement;
-                        break;
-                    }
-                    if (candidate_replacement->incrtx_count < min_incrtx_count || min_incrtx_count == 0) {
-                        printk(".. has been retransmitted the least times to far -- best choice so far \n");
-                        best_replacement = candidate_replacement;
-                        min_incrtx_count = candidate_replacement->incrtx_count;
-                        candidate_replacement = candidate_replacement->next;
+                    bytes_to_candidate += candidate_replacement->length;
+                    candidate_replacement = candidate_replacement->next;
+                }
+                /* identify replacement */
+                struct hlywd_output_msg *replacement_msg = NULL;
+                int bytes_to_replacement = 0;
+                if (best_live != NULL) {
+                    replacement_msg = best_live;
+                    bytes_to_replacement = bytes_to_best_live_replacement;
+                } else {
+                    replacement_msg = best_expired;
+                    bytes_to_replacement = bytes_to_best_expired_replacement;
+                }
+                /* swap replacement into msg */
+                if (replacement_msg != NULL) {
+                    /* swap metadata */
+                    replacement_msg->sent = 1;
+                    msg->msg_id = replacement_msg->msg_id;
+                    msg->deadline = replacement_msg->deadline;
+                    msg->substream = replacement_msg->substream;
+                    msg->has_dependencies = replacement_msg->has_dependencies;
+                    msg->is_replacement = 1;
+                    msg->sent = 1;
+                    void *replacement_msg_data = (void *) kmalloc(msg->length, GFP_KERNEL);
+                    if (replacement_msg_data) {
+                        struct sk_buff *replacement_skb = tcp_write_queue_head(sk);
+                        /* fast forward to skb containing start of replacement msg */
+                        while (replacement_skb->len <= bytes_to_replacement) {
+                            bytes_to_replacement -= replacement_skb->len;
+                            if (!tcp_skb_is_last(sk, replacement_skb)) {
+                                replacement_skb = tcp_write_queue_next(sk, replacement_skb);
+                            }
+                        }
+                        int bytes_to_copy = replacement_msg->length;
+                        while (bytes_to_copy > 0) {
+                            int bytes_can_copy = min(bytes_to_copy, replacement_skb->len-bytes_to_replacement);
+                            skb_copy_bits(replacement_skb, bytes_to_replacement, replacement_msg_data+(replacement_msg->length-bytes_to_copy), bytes_can_copy);
+                            bytes_to_replacement = 0;
+                            bytes_to_copy -= bytes_can_copy;
+                            if (tcp_skb_is_last(sk, replacement_skb)) {
+                                break;
+                            } else {
+                                replacement_skb = tcp_write_queue_next(sk, replacement_skb);
+                            }
+                        }    
+                        skb_store_bits(skb, bytes_to_msg, replacement_msg_data, replacement_msg->length);
+                        kfree(replacement_msg_data);       
+                        int length_diff = msg->length-replacement_msg->length;
+                        if (length_diff != 0) {
+                            uint8_t *padding_msg = generate_padding_message(sk, length_diff);
+                            skb_store_bits(skb, bytes_to_msg+replacement_msg->length, padding_msg, length_diff);
+                            //printk("padded! :)\n");
+                            kfree(padding_msg);
+                        } 
                     }
                 }
-                printk("best replacement id %u\n", best_replacement->msg_id);
-                if (best_replacement != msg) {
-                    printk("TCPH: replacing msg %u with msg %u\n", msg->msg_id, best_replacement->msg_id);
-                    best_replacement->incrtx_count++;
-                }
-            } else {
-                printk("TCPH: msg %u live\n", msg->msg_id);
             }
-            bytes_retrans -= msg->length;
-            msg = msg->next;
         } else {
-            printk("TCP Hollywood (PR): Partially retransmitting msg %u\n", msg->msg_id);
-            bytes_retrans = 0;
+            msg->sent = 1;
         }
+        bytes_trans -= msg->length;
+        bytes_to_msg += msg->length;
+        msg = msg->next;
     }
 }
 
@@ -286,7 +422,7 @@ void enqueue_hollywood_input_segment(struct sock *sk, struct sk_buff *skb, size_
         return;
     }
     
-    printk("TCP Hollywood: enqueue_hollywood_input_segment [%u, len: %d (oo? %d)]\n", TCP_SKB_CB(skb)->seq, len, in_order);
+    //printk("TCP Hollywood: enqueue_hollywood_input_segment [%u, len: %d (oo? %d)]\n", TCP_SKB_CB(skb)->seq, len, in_order);
     
     struct hlywd_input_segment *seg = get_hollywood_input_segment(sk);
     if (seg == NULL) {

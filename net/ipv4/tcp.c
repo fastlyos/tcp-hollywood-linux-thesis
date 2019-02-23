@@ -431,6 +431,9 @@ void tcp_init_sock(struct sock *sk)
     tp->hlywd_output_q.tail = NULL;
     tp->hlywd_output_free_q.head = NULL;
     tp->hlywd_output_free_q.tail = NULL;
+    tp->hlywd_highest_dep_id = 0;
+    tp->hlywd_padding_buffer = (uint8_t *) kmalloc(1500, GFP_KERNEL);
+    memset(tp->hlywd_padding_buffer, 1, 1500);
 
 	local_bh_disable();
 	sock_update_memcg(sk);
@@ -1110,7 +1113,7 @@ int tcp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	lock_sock(sk);
 
     if (tp->hlywd_pr) {
-        size_t metadata_size = enqueue_hollywood_output_msg(sk, msg->msg_iov->iov_base+msg->msg_iov->iov_len- (9 + (2*sizeof(struct timespec))), size);
+        size_t metadata_size = enqueue_hollywood_output_msg(sk, msg->msg_iov->iov_base+msg->msg_iov->iov_len- (9 + (sizeof(struct timespec))), size);
         msg->msg_iov->iov_len -= metadata_size;
  		size -= metadata_size;
     }

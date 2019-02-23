@@ -321,8 +321,8 @@ struct tcp_sock {
 	/* TCP Hollywood */
 	u8	hlywd_ood;     /* deliver frames out-of-order? */
 	u8  hlywd_pr;      /* enable partial reliability?  */
-
-	struct timespec hlywd_playout; /* play out delay for partial reliability calculations */
+    u32 hlywd_highest_dep_id; /* highest message dependency ID seen */
+    uint8_t *hlywd_padding_buffer;
 	
 	struct hlywd_input_queue hlywd_input_q;
 	struct hlywd_input_queue hlywd_input_free_q;
