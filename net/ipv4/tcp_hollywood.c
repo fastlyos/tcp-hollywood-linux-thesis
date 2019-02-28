@@ -64,13 +64,13 @@ size_t cobs_encode(const uint8_t *input, size_t length, uint8_t *output)
     return write_index;
 }
 
-uint8_t *generate_padding_message(struct sock *sk, int padding_length) {
+uint8_t *generate_padding_message(struct sock *sk, size_t padding_length) {
     struct tcp_sock *tp = tcp_sk(sk);
-    int cobs_added_bytes = padding_length/257; /* every 256 bytes, COBS adds a byte */
-    uint8_t *padding_message_encoded = (uint8_t *) kmalloc(padding_length, GFP_KERNEL); 
+    int cobs_added_bytes = padding_length/257;
+    uint8_t *padding_message_encoded = (uint8_t *) kmalloc(padding_length, GFP_KERNEL);
     padding_message_encoded[0] = '\0';
     size_t encoded_len = cobs_encode(tp->hlywd_padding_buffer, padding_length-3-cobs_added_bytes, padding_message_encoded+1);
-    padding_message_encoded[encoded_len+2] = '\0';
+    padding_message_encoded[encoded_len+1] = '\0';
     return padding_message_encoded;
 }
 
@@ -153,7 +153,7 @@ size_t enqueue_hollywood_output_msg(struct sock *sk, unsigned char __user *metad
         msg->is_replacement = 0;
         msg->sent = 0;
         msg->length = write_size - (9+sizeof(struct timespec));
-        //printk("Hollywood (PR): queued msg (id %u, deadline %lld.%.9ld)\n", msg->msg_id, msg->deadline.tv_sec, msg->deadline.tv_nsec);
+        //printk("Hollywood (PR): queued msg (id %u, deadline %lld.%.9ld, length %d)\n", msg->msg_id, msg->deadline.tv_sec, msg->deadline.tv_nsec, msg->length);
     } else {
         metadata_size = 1;
         msg->length = write_size - 1;
@@ -229,8 +229,8 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
     
     //printk("TCP Hollywood (PR): transmitting seq %u len %d\n", tcb->seq, skb->len);
     
-    size_t offset = tcb->seq-tp->snd_una;
-    size_t bytes_trans = skb->len;
+    int offset = tcb->seq-tp->snd_una;
+    int bytes_trans = skb->len;
     struct hlywd_output_msg *msg = tp->hlywd_output_q.head;
     struct timespec owd_est;
     struct timespec current_time;
@@ -247,7 +247,7 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
     uint owd_nsec = ((tp->srtt_us >> 3) * 1000)/2; 
     owd_est.tv_sec = owd_nsec / 1000000000;
     owd_est.tv_nsec = owd_nsec % 1000000000;
-    
+
     while (offset > 0 && msg != NULL) {
         if (msg->length <= offset) {
             /* message is entirely in offset (not sent) */
@@ -262,7 +262,7 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
             msg = msg->next;
         }
     }
-    
+        
     /* msg should now point to the first complete message being sent */
     while (bytes_trans > 0 && msg != NULL) {
         if (msg-> length <= bytes_trans && msg->sent == 1) {
@@ -356,7 +356,6 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
                         if (length_diff != 0) {
                             uint8_t *padding_msg = generate_padding_message(sk, length_diff);
                             skb_store_bits(skb, bytes_to_msg+replacement_msg->length, padding_msg, length_diff);
-                            //printk("padded! :)\n");
                             kfree(padding_msg);
                         } 
                     }
