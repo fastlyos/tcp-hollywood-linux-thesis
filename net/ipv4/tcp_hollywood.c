@@ -130,7 +130,6 @@ size_t enqueue_hollywood_output_msg(struct sock *sk, unsigned char __user *metad
     copy_from_user((void *) &msg->substream, metadata, 1);
     
     if (msg->substream == 2) {
-        metadata_size = 9+sizeof(struct timespec);
         copy_from_user((void *) &msg->msg_id, metadata+1, 4);
         copy_from_user((void *) &msg->deadline, metadata+5, sizeof(struct timespec));
         u32 dependency_msg_id;
@@ -153,12 +152,12 @@ size_t enqueue_hollywood_output_msg(struct sock *sk, unsigned char __user *metad
         msg->is_replacement = 0;
         msg->sent = 0;
         msg->length = write_size - (9+sizeof(struct timespec));
-        //printk("Hollywood (PR): queued msg (id %u, deadline %lld.%.9ld, length %d)\n", msg->msg_id, msg->deadline.tv_sec, msg->deadline.tv_nsec, msg->length);
+        printk("Hollywood (PR): queued msg (id %u, deadline %lld.%.9ld, length %d)\n", msg->msg_id, msg->deadline.tv_sec, msg->deadline.tv_nsec, msg->length);
     } else {
-        metadata_size = 1;
-        msg->length = write_size - 1;
+        msg->length = write_size - (9+sizeof(struct timespec));
         msg->msg_id = 0;
-        //printk("Hollywood (PR): queued msg (id %u)\n", msg->msg_id);
+        msg->sent = 0;
+        printk("Hollywood (PR): queued msg (id %u, ss %d, length %d)\n", msg->msg_id, msg->substream, msg->length);
     }
     
     msg->next = NULL;
@@ -172,24 +171,26 @@ size_t enqueue_hollywood_output_msg(struct sock *sk, unsigned char __user *metad
         tp->hlywd_output_q.tail = msg;
     }
     
-    return metadata_size;
+    return 0;
 }
 
 void dequeue_hollywood_output_queue(struct sock *sk, size_t bytes_acked) {
     struct tcp_sock *tp = tcp_sk(sk);
 
+    printk("TCP Hollywood: acking %d bytes\n", bytes_acked);
+    
     while (bytes_acked > 0) {
         struct hlywd_output_msg *head = tp->hlywd_output_q.head;
         if (head == NULL) {
             break;
         }
         if (head->length <= bytes_acked) {
-            //printk("TCP Hollywood: fully ACK'd msg %u\n", head->msg_id);
+            printk("TCP Hollywood: fully ACK'd msg %u\n", head->msg_id);
             tp->hlywd_output_q.head = head->next;
             bytes_acked -= head->length;
             free_hollywood_output_message(head, sk);
         } else {
-            //printk("TCP Hollywood: partially ACK'd msg %u\n", head->msg_id);
+            printk("TCP Hollywood: partially ACK'd msg %u\n", head->msg_id);
             head->length -= bytes_acked;
             head->partially_acked = 1;
             bytes_acked = 0;
@@ -227,8 +228,8 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
         return;
     }
     
-    //printk("TCP Hollywood (PR): transmitting seq %u len %d\n", tcb->seq, skb->len);
-    
+    printk("TCP Hollywood (PR): transmitting seq %u len %d offset %d\n", tcb->seq, skb->len, tcb->seq-tp->snd_una);
+ 
     int offset = tcb->seq-tp->snd_una;
     int bytes_trans = skb->len;
     struct hlywd_output_msg *msg = tp->hlywd_output_q.head;
@@ -248,31 +249,44 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
     owd_est.tv_sec = owd_nsec / 1000000000;
     owd_est.tv_nsec = owd_nsec % 1000000000;
 
+    printk("offset is %d; msg is %p\n", offset, msg);
+    
     while (offset > 0 && msg != NULL) {
         if (msg->length <= offset) {
             /* message is entirely in offset (not sent) */
-            msg = msg->next;
             offset -= msg->length;
+            printk("msg id %d length %d skipped\n", msg->msg_id, msg->length);
         } else {
             /* message is _partially_ in offset -- some of it is sent */
             bytes_trans -= (msg->length - offset);
             bytes_to_msg += (msg->length - offset);
             offset = 0;
             msg->sent = 1;
-            msg = msg->next;
+            printk("msg id %d length %d skipped\n", msg->msg_id, msg->length);
         }
+        msg = msg->next;
     }
-        
-    /* msg should now point to the first complete message being sent */
+    
+    printk("offset is %d; done\n", offset);
+
+    printk("bytes_trans is %d\n", bytes_trans);
+    
     while (bytes_trans > 0 && msg != NULL) {
-        if (msg-> length <= bytes_trans && msg->sent == 1) {
-            /* msg is being transmitted in full -- should be checked for liveness */
+        if (msg->substream != 2) {
+            printk("TCP Hollywood: sending message (id %d, length %d) -- non-timelined; no check needed\n", msg->msg_id, msg->length);
+        } else if (msg->length > bytes_trans) {
+            printk("TCP Hollywood: sending message (id %d, length %d) -- only part of message being sent; no replacement possible\n", msg->msg_id, msg->length);
+        } else if (msg->sent == 0) {
+            printk("TCP Hollywood: sending message (id %d, length %d) -- message has not yet been sent; no replacement possible\n", msg->msg_id, msg->length);
+        } else {
+            printk("TCP Hollywood: sending message (id %d, length %d) -- message being sent in full; must check for liveness\n", msg->msg_id, msg->length);
             int msg_expired = 0;
             struct timespec timediff = check_message_liveness(sk, &current_time, &owd_est, msg, &msg_expired);
             if ((msg->has_dependencies == 1 && msg->is_replacement == 0) || (msg->msg_id <= tp->hlywd_highest_dep_id && msg->is_replacement == 0)) {
+                printk("TCP Hollywood: message has dependencies or might have dependencies in the future; no replacement possible\n");
                 msg->sent = 1;
-            } else if ((msg_expired == 1 && msg->sent == 0) || msg->sent == 1) {
-                /* msg has expired -- need to find a replacement */
+            } else if (msg_expired == 1) {
+                printk("TCP Hollywood: message has expired; must check for replacement\n");
                 /* best unexpired candidate */
                 struct hlywd_output_msg *best_live = NULL;
                 struct timespec          best_live_timediff;
@@ -286,7 +300,12 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
                 int                      bytes_to_candidate = 0;
                 while (candidate_replacement != NULL) {
                     int length_diff = msg->length-candidate_replacement->length;
-                    if (length_diff == 0 || (length_diff >= 4 && length_diff <= 1500)) {
+                    if (candidate_replacement->substream != 2) {
+                        printk("TCP Hollywood: candidate replacement is not timelined; skipping\n");
+                    } else if (length_diff < 4 || length_diff > 1500) {
+                        printk("TCP Hollywood: length difference cannot be padded; skipping\n");
+                    } else {
+                        printk("TCP Hollywood: possible replacement; checking its liveness\n");
                         int candidate_replacement_expired = 0;
                         struct timespec replacement_timediff = check_message_liveness(sk, &current_time, &owd_est, candidate_replacement, &candidate_replacement_expired);
                         if (!candidate_replacement_expired) {
@@ -297,7 +316,7 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
                                 bytes_to_best_live_replacement = bytes_to_candidate;
                             }
                         } else {
-                            /* candidate replacement is expired */
+                            /* candidate replacement has expired */
                             if (best_live == NULL && (best_expired == NULL || timespec_compare(&replacement_timediff, &best_expired_timediff) < 0)) {
                                 best_expired = candidate_replacement;
                                 best_expired_timediff = replacement_timediff;
@@ -331,9 +350,9 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
                     void *replacement_msg_data = (void *) kmalloc(msg->length, GFP_KERNEL);
                     if (replacement_msg_data) {
                         struct sk_buff *replacement_skb = tcp_write_queue_head(sk);
-                        /* fast forward to skb containing start of replacement msg */
+                        /* fast forward to skb containing start of replacement message */
                         while (replacement_skb->len <= bytes_to_replacement) {
-                            bytes_to_replacement -= replacement_skb->len;
+                            bytes_to_replacement  -= replacement_skb->len;
                             if (!tcp_skb_is_last(sk, replacement_skb)) {
                                 replacement_skb = tcp_write_queue_next(sk, replacement_skb);
                             }
@@ -349,25 +368,23 @@ void process_tx(struct sock *sk, struct sk_buff *skb) {
                             } else {
                                 replacement_skb = tcp_write_queue_next(sk, replacement_skb);
                             }
-                        }    
+                        }
                         skb_store_bits(skb, bytes_to_msg, replacement_msg_data, replacement_msg->length);
-                        kfree(replacement_msg_data);       
+                        kfree(replacement_msg_data);
                         int length_diff = msg->length-replacement_msg->length;
                         if (length_diff != 0) {
                             uint8_t *padding_msg = generate_padding_message(sk, length_diff);
                             skb_store_bits(skb, bytes_to_msg+replacement_msg->length, padding_msg, length_diff);
                             kfree(padding_msg);
-                        } 
+                        }
                     }
                 }
             }
-        } else {
-            msg->sent = 1;
         }
-        bytes_trans -= msg->length;
         bytes_to_msg += msg->length;
+        bytes_trans -= msg->length;
         msg = msg->next;
-    }
+    } 
 }
 
 /***************************************************************************************/

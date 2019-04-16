@@ -1113,9 +1113,9 @@ int tcp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	lock_sock(sk);
 
     if (tp->hlywd_pr) {
-        size_t metadata_size = enqueue_hollywood_output_msg(sk, msg->msg_iov->iov_base+msg->msg_iov->iov_len- (9 + (sizeof(struct timespec))), size);
-        msg->msg_iov->iov_len -= metadata_size;
- 		size -= metadata_size;
+        enqueue_hollywood_output_msg(sk, msg->msg_iov->iov_base+msg->msg_iov->iov_len-(9 + (sizeof(struct timespec))), size);
+        msg->msg_iov->iov_len -= (9 + (sizeof(struct timespec)));
+ 		size -= (9 + (sizeof(struct timespec)));
     }
     
 	flags = msg->msg_flags;
