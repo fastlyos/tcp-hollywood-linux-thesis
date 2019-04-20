@@ -19,8 +19,10 @@
 struct hlywd_output_msg {
     u32 msg_id; /* ID of this message */
     size_t length; /* length of this message */
+    size_t written_size; /* number of bytes written */
     struct timespec deadline; /* deadline of this message */
     u8 substream; /* ID of the substream of this message */
+    size_t bytes_acked;
 
     /* flags */
     int partially_acked; /* set if this message has been partially ack'd */
@@ -68,6 +70,7 @@ void enqueue_hollywood_input_segment(struct sock *sk, struct sk_buff *skb, size_
 void dequeue_hollywood_input_queue(struct sock *sk);
 void free_hollywood_input_segment(struct hlywd_input_segment *seg, struct sock *sk);
 struct hlywd_input_segment *get_hollywood_input_segment(struct sock *sk);
+void write_data_hollywood(struct sock *sk, size_t write_len);
 
 void destroy_hollywood_output_message(struct hlywd_output_msg *msg);
 void destroy_hollywood_output_queue(struct hlywd_output_queue *q);

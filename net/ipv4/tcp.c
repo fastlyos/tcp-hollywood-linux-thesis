@@ -434,7 +434,8 @@ void tcp_init_sock(struct sock *sk)
     tp->hlywd_highest_dep_id = 0;
     tp->hlywd_padding_buffer = (uint8_t *) kmalloc(1500, GFP_KERNEL);
     memset(tp->hlywd_padding_buffer, 1, 1500);
-
+    tp->hlywd_metadata_buffer = (uint8_t *) kmalloc(9+sizeof(struct timespec)+sizeof(size_t), GFP_KERNEL);
+    tp->hlywd_metadata_buffer_len = 0;
 	local_bh_disable();
 	sock_update_memcg(sk);
 	sk_sockets_allocated_inc(sk);
@@ -1109,13 +1110,14 @@ int tcp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	int mss_now = 0, size_goal, copied_syn = 0, offset = 0;
 	bool sg;
 	long timeo;
-
+    size_t bytes_eaten = 0;
 	lock_sock(sk);
 
     if (tp->hlywd_pr) {
-        enqueue_hollywood_output_msg(sk, msg->msg_iov->iov_base+msg->msg_iov->iov_len-(9 + (sizeof(struct timespec))), size);
-        msg->msg_iov->iov_len -= (9 + (sizeof(struct timespec)));
- 		size -= (9 + (sizeof(struct timespec)));
+        bytes_eaten = enqueue_hollywood_output_msg(sk, msg->msg_iov->iov_base, size);
+        msg->msg_iov->iov_len -= bytes_eaten;
+        msg->msg_iov->iov_base += bytes_eaten;
+ 		size -= bytes_eaten;
     }
     
 	flags = msg->msg_flags;
@@ -1321,6 +1323,9 @@ out:
 		tcp_push(sk, flags, mss_now, tp->nonagle, size_goal);
 out_nopush:
 	release_sock(sk);
+	if (tp->hlywd_pr) {
+	    write_data_hollywood(sk, copied+copied_syn);
+    }
 	return copied + copied_syn;
 
 do_fault:

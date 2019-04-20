@@ -329,6 +329,8 @@ struct tcp_sock {
 	
 	struct hlywd_output_queue hlywd_output_q;
 	struct hlywd_output_queue hlywd_output_free_q;
+	uint8_t *hlywd_metadata_buffer;
+	size_t hlywd_metadata_buffer_len;
 };
 
 enum tsq_flags {
